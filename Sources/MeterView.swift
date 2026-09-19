@@ -27,10 +27,19 @@ final class MeterView: NSView {
         levels = next
     }
 
-    /// A useful audio scale: -60 dBFS at the bottom and 0 dBFS at the top.
+    /// A display scale that keeps background noise compact while preserving detail
+    /// around the yellow and red boundaries.
     static func height(for amplitude: Float) -> Float {
         guard amplitude.isFinite, amplitude > 0 else { return 0 }
-        return min(1, max(0, (20 * log10(amplitude) + 60) / 60))
+        let decibels = 20 * log10(amplitude)
+        if decibels <= -42 { return 0 }
+        if decibels <= -9 {
+            return (decibels + 42) / 33 * (13.0 / 18.0)
+        }
+        if decibels <= -1 {
+            return 13.0 / 18.0 + (decibels + 9) / 8 * (3.0 / 18.0)
+        }
+        return min(1, 16.0 / 18.0 + (decibels + 1) * (2.0 / 18.0))
     }
 
     override func draw(_ dirtyRect: NSRect) {

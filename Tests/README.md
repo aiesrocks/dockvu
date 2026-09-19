@@ -11,9 +11,15 @@ Build, then stress the actual meter renderer:
 
 ```sh
 bash scripts/build.sh
+xcrun swiftc -module-cache-path build/module-cache Sources/MeterView.swift Tests/MeterScaleTests.swift -o build/meter-scale-tests -framework AppKit
+build/meter-scale-tests
 xcrun swiftc -O -module-cache-path build/module-cache Sources/MeterView.swift Tests/MeterStress.swift -o build/meter-stress -framework AppKit
 build/meter-stress
 ```
+
+The scale test checks rendered height and lit-segment boundaries across the green,
+yellow, and red ranges. It also covers the −42 dBFS floor, silence, invalid values,
+and overrange clamping.
 
 Run the complete app for longer than the reported 14–102 second crash intervals:
 

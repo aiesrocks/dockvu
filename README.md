@@ -28,7 +28,7 @@ To keep the app, copy `build/DockVU.app` to Applications. You can add it to Logi
 
 ## What the bars mean
 
-These are live **audio signal levels**, not the volume-slider percentages. The display spans −60 to 0 dBFS, with yellow above approximately −16 dBFS and red above −6 dBFS. Output reflects the digital audio stream; it is not a measurement of speaker loudness. Turning a hardware volume knob down may not change the bars.
+These are live **audio signal levels**, not the volume-slider percentages. The display spans −42 to 0 dBFS. Yellow begins above −9 dBFS and red above −1 dBFS, so background noise and ordinary listening levels occupy fewer bars while signals close to clipping remain easy to see. This changes only the display scale; it does not add gain or a noise gate. Output reflects the digital audio stream; it is not a measurement of speaker loudness. Turning a hardware volume knob down may not change the bars.
 
 The app follows the default input and output devices. On a multichannel audio interface, output meters show the first two channels of its first output stream. Audio is processed in memory only: nothing is recorded to a file or sent over the network. macOS may show its microphone/audio-capture indicator while monitoring is active.
 
