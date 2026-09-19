@@ -39,3 +39,15 @@ build/camera-tests --live
 ```
 
 The tests cover any-active-camera precedence, unknown device states, idle, no cameras, and failed enumeration. `--live` also prints the current passive hardware reading without activating a camera. The meter stress cycles gray, red, and amber cues. A physical camera-on/off transition requires a connected camera and another app using it.
+
+## Device volume and mute
+
+```sh
+xcrun swiftc -module-cache-path build/module-cache Sources/OutputVolume.swift Tests/OutputVolumeTests.swift -o build/output-volume-tests -framework CoreAudio
+build/output-volume-tests --live
+```
+
+The deterministic checks use an injected property reader and never alter device settings. They
+cover dB preference over scalar volume, main and per-channel output controls and mute,
+unsupported-control unity fallback, and main input mute without applying input hardware gain twice.
+`--live` optionally prints the current read-only result for the default devices.

@@ -18,6 +18,8 @@ open build/DockVU.app
 
 Click **Start audio**, then allow microphone and system-audio access when macOS asks. Close the window to leave just the live Dock meters. Click the Dock icon to reopen it; right-click for pause and resume. Quit with ⌘Q.
 
+Choose **Low**, **Normal**, or **High** separately for **Input sensitivity** and **Output sensitivity** in the window. Normal keeps the current response; Low shows fewer bars and High shows more. Choices are saved between launches and affect only the meters, not your audio volume.
+
 ## Camera activity
 
 The single cue dot above the audio bars turns **red** when a camera is running in any app. The window lists active camera names. **Gray** means no detected camera is active; **amber** means activity could not be checked fully.
@@ -28,7 +30,11 @@ To keep the app, copy `build/DockVU.app` to Applications. You can add it to Logi
 
 ## What the bars mean
 
-These are live **audio signal levels**, not the volume-slider percentages. The display spans −42 to 0 dBFS. Yellow begins above −9 dBFS and red above −1 dBFS, so background noise and ordinary listening levels occupy fewer bars while signals close to clipping remain easy to see. This changes only the display scale; it does not add gain or a noise gate. Output reflects the digital audio stream; it is not a measurement of speaker loudness. Turning a hardware volume knob down may not change the bars.
+These are live **audio signal levels**, not the volume-slider percentages. The display spans −42 to 0 dBFS. Yellow begins above −9 dBFS and red above −1 dBFS, so background noise and ordinary listening levels occupy fewer bars while signals close to clipping remain easy to see. This changes only the display scale; it does not add gain or a noise gate.
+
+The **L / R** meters account for the default output device’s volume and mute settings, refreshed ten times per second. Device-reported decibels are used when available; devices exposing only a volume percentage use an approximate scale. Devices that expose no volume control retain the digital signal level. Physical knobs that do not report their setting to macOS cannot be reflected, and the bars are not a measurement of acoustic loudness.
+
+The **IN** meter reads the captured microphone signal, which already includes the input device’s gain. Changing the default input’s gain therefore changes the captured level without applying that gain a second time. A reported device-wide input mute also clears the input meter; individual channel muting is reflected in captured samples. DockVU only reads these settings; it never changes input or output volume.
 
 The app follows the default input and output devices. On a multichannel audio interface, output meters show the first two channels of its first output stream. Audio is processed in memory only: nothing is recorded to a file or sent over the network. macOS may show its microphone/audio-capture indicator while monitoring is active.
 

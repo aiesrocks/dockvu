@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Combine
 import CoreAudio
 import Foundation
@@ -24,6 +25,18 @@ final class AudioMonitor: NSObject, ObservableObject {
     private var wantsToRun = false
     private var inputError: String?
     private var outputError: String?
+
+    private let deviceVolume = OutputVolume()
+    private var rawInputLevel: Float = 0
+    private var rawOutputLeftLevel: Float = 0
+    private var rawOutputRightLevel: Float = 0
+    private var outputGain = OutputVolume.StereoGain.unity
+    private var inputAudibility: Float = 1
+    private var inputDeviceID = AudioObjectID(kAudioObjectUnknown)
+    private var outputDeviceID = AudioObjectID(kAudioObjectUnknown)
+    private var lastDeviceLevelRefresh: TimeInterval = -.infinity
+    private var inputCaptureGeneration: UInt64 = 0
+    private var outputCaptureGeneration: UInt64 = 0
 
     private var tapDescription: CATapDescription?
     private var processTapID = AudioObjectID(kAudioObjectUnknown)
@@ -111,8 +124,28 @@ final class AudioMonitor: NSObject, ObservableObject {
         inputLevel = 0
         outputLeftLevel = 0
         outputRightLevel = 0
+        resetDeviceLevels()
         isRunning = false
         status = "Stopped"
+    }
+
+    /// Polls hardware controls off the real-time audio threads and reapplies them to the most
+    /// recent raw peaks. The latter makes a volume or mute change visible even during silence.
+    func refreshDeviceLevels(now: TimeInterval) {
+        guard wantsToRun, now - lastDeviceLevelRefresh >= 0.1 else { return }
+        lastDeviceLevelRefresh = now
+
+        if inputDeviceID != kAudioObjectUnknown {
+            inputAudibility = deviceVolume.inputAudibility(deviceID: inputDeviceID)
+        } else {
+            inputAudibility = 1
+        }
+        if outputDeviceID != kAudioObjectUnknown {
+            outputGain = deviceVolume.gains(deviceID: outputDeviceID)
+        } else {
+            outputGain = .unity
+        }
+        applyDeviceLevels()
     }
 
     // MARK: - Microphone
@@ -130,11 +163,15 @@ final class AudioMonitor: NSObject, ObservableObject {
         }
 
         if !inputTapInstalled {
+            inputCaptureGeneration &+= 1
+            let captureGeneration = inputCaptureGeneration
             input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
                 let level = Self.peakLevel(in: buffer)
                 Task { @MainActor [weak self] in
-                    guard let self, self.wantsToRun else { return }
-                    self.inputLevel = level
+                    guard let self, self.wantsToRun,
+                          self.inputCaptureGeneration == captureGeneration else { return }
+                    self.rawInputLevel = level
+                    self.applyDeviceLevels()
                 }
             }
             inputTapInstalled = true
@@ -144,6 +181,10 @@ final class AudioMonitor: NSObject, ObservableObject {
             inputEngine.prepare()
             try inputEngine.start()
             inputIsActive = true
+            inputDeviceID = Self.currentDeviceID(for: input)
+                ?? Self.defaultDeviceID(selector: kAudioHardwarePropertyDefaultInputDevice)
+                ?? AudioObjectID(kAudioObjectUnknown)
+            lastDeviceLevelRefresh = -.infinity
             inputError = nil
             refreshDeviceNames()
             refreshRunningState()
@@ -155,13 +196,18 @@ final class AudioMonitor: NSObject, ObservableObject {
     }
 
     private func stopInput() {
+        inputCaptureGeneration &+= 1
         inputEngine.stop()
         if inputTapInstalled {
             inputEngine.inputNode.removeTap(onBus: 0)
             inputTapInstalled = false
         }
         inputIsActive = false
+        rawInputLevel = 0
         inputLevel = 0
+        inputAudibility = 1
+        inputDeviceID = AudioObjectID(kAudioObjectUnknown)
+        lastDeviceLevelRefresh = -.infinity
     }
 
     private func scheduleInputRestart() {
@@ -200,9 +246,15 @@ final class AudioMonitor: NSObject, ObservableObject {
     private func createOutputTap() throws {
         guard processTapID == kAudioObjectUnknown else { return }
 
-        guard let outputUID = Self.defaultOutputDeviceUID() else {
+        guard let selectedOutputDeviceID = Self.defaultDeviceID(
+            selector: kAudioHardwarePropertyDefaultOutputDevice
+        ), let outputUID = Self.deviceUID(deviceID: selectedOutputDeviceID) else {
             throw MonitorError.noDefaultOutput
         }
+        outputDeviceID = selectedOutputDeviceID
+        lastDeviceLevelRefresh = -.infinity
+        outputCaptureGeneration &+= 1
+        let captureGeneration = outputCaptureGeneration
         let description = CATapDescription(
             excludingProcesses: [],
             deviceUID: outputUID,
@@ -256,9 +308,11 @@ final class AudioMonitor: NSObject, ObservableObject {
                 ) { _, inputData, _, _, _ in
                     let levels = Self.stereoPeakLevels(in: inputData)
                     Task { @MainActor [weak self] in
-                        guard let self, self.wantsToRun else { return }
-                        self.outputLeftLevel = levels.left
-                        self.outputRightLevel = levels.right
+                        guard let self, self.wantsToRun,
+                              self.outputCaptureGeneration == captureGeneration else { return }
+                        self.rawOutputLeftLevel = levels.left
+                        self.rawOutputRightLevel = levels.right
+                        self.applyDeviceLevels()
                     }
                 },
                 operation: "connect the output meter"
@@ -284,6 +338,7 @@ final class AudioMonitor: NSObject, ObservableObject {
     }
 
     private func stopOutputTap() {
+        outputCaptureGeneration &+= 1
         if aggregateDeviceID != kAudioObjectUnknown, let outputIOProcID {
             AudioDeviceStop(aggregateDeviceID, outputIOProcID)
             AudioDeviceDestroyIOProcID(aggregateDeviceID, outputIOProcID)
@@ -302,8 +357,13 @@ final class AudioMonitor: NSObject, ObservableObject {
         }
         tapDescription = nil
         outputIsActive = false
+        rawOutputLeftLevel = 0
+        rawOutputRightLevel = 0
         outputLeftLevel = 0
         outputRightLevel = 0
+        outputGain = .unity
+        outputDeviceID = AudioObjectID(kAudioObjectUnknown)
+        lastDeviceLevelRefresh = -.infinity
     }
 
     // MARK: - Device changes and display state
@@ -386,6 +446,23 @@ final class AudioMonitor: NSObject, ObservableObject {
                 removeDeviceListeners()
             }
         }
+    }
+
+    private func applyDeviceLevels() {
+        inputLevel = min(1, rawInputLevel * inputAudibility)
+        outputLeftLevel = min(1, rawOutputLeftLevel * outputGain.left)
+        outputRightLevel = min(1, rawOutputRightLevel * outputGain.right)
+    }
+
+    private func resetDeviceLevels() {
+        rawInputLevel = 0
+        rawOutputLeftLevel = 0
+        rawOutputRightLevel = 0
+        outputGain = .unity
+        inputAudibility = 1
+        inputDeviceID = AudioObjectID(kAudioObjectUnknown)
+        outputDeviceID = AudioObjectID(kAudioObjectUnknown)
+        lastDeviceLevelRefresh = -.infinity
     }
 
     // MARK: - Audio helpers
@@ -501,10 +578,7 @@ final class AudioMonitor: NSObject, ObservableObject {
         return deviceName.takeRetainedValue() as String
     }
 
-    nonisolated private static func defaultOutputDeviceUID() -> String? {
-        guard let deviceID = defaultDeviceID(selector: kAudioHardwarePropertyDefaultOutputDevice) else {
-            return nil
-        }
+    nonisolated private static func deviceUID(deviceID: AudioObjectID) -> String? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceUID,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -524,6 +598,23 @@ final class AudioMonitor: NSObject, ObservableObject {
         }
         guard let deviceUID else { return nil }
         return deviceUID.takeRetainedValue() as String
+    }
+
+    nonisolated private static func currentDeviceID(for input: AVAudioInputNode) -> AudioObjectID? {
+        guard let audioUnit = input.audioUnit else { return nil }
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioUnitGetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            &size
+        ) == noErr, deviceID != kAudioObjectUnknown else {
+            return nil
+        }
+        return deviceID
     }
 
     nonisolated private static func defaultDeviceID(

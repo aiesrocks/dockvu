@@ -15,6 +15,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let cameraLabel = NSTextField(labelWithString: "Camera · Checking…")
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let toggle = NSButton(title: "Start monitoring", target: nil, action: nil)
+    private let inputSensitivityPopup = NSPopUpButton()
+    private let outputSensitivityPopup = NSPopUpButton()
+    private var inputSensitivity = MeterSensitivity(
+        rawValue: UserDefaults.standard.string(forKey: "inputSensitivity") ?? ""
+    ) ?? .normal
+    private var outputSensitivity = MeterSensitivity(
+        rawValue: UserDefaults.standard.string(forKey: "outputSensitivity") ?? ""
+    ) ?? .normal
     private var demo = CommandLine.arguments.contains("--demo")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -51,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func createWindow() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 495), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 585), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "DockVU"
         window.isReleasedWhenClosed = false
         window.center()
@@ -67,6 +75,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             $0.widthAnchor.constraint(lessThanOrEqualToConstant: 330).isActive = true
         }
         cameraLabel.toolTip = "Red: a camera is in use. Gray: idle. Amber: activity could not be checked. Camera status stays on when audio is paused."
+        let inputSensitivityRow = makeSensitivityRow(
+            title: "Input sensitivity",
+            popup: inputSensitivityPopup,
+            selection: inputSensitivity,
+            action: #selector(changeInputSensitivity)
+        )
+        let outputSensitivityRow = makeSensitivityRow(
+            title: "Output sensitivity",
+            popup: outputSensitivityPopup,
+            selection: outputSensitivity,
+            action: #selector(changeOutputSensitivity)
+        )
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.alignment = .center
@@ -79,7 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let privacy = NSButton(title: "Audio permissions…", target: self, action: #selector(openPrivacy))
         privacy.bezelStyle = .inline
         privacy.font = .systemFont(ofSize: 11)
-        let stack = NSStackView(views: [title, subtitle, windowMeter, inputLabel, outputLabel, cameraLabel, statusLabel, toggle, privacy])
+        let stack = NSStackView(views: [title, subtitle, windowMeter, inputLabel, outputLabel, cameraLabel, inputSensitivityRow, outputSensitivityRow, statusLabel, toggle, privacy])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 12
@@ -94,8 +114,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshLabels()
     }
 
+    private func makeSensitivityRow(
+        title: String,
+        popup: NSPopUpButton,
+        selection: MeterSensitivity,
+        action: Selector
+    ) -> NSStackView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 12)
+        popup.addItems(withTitles: MeterSensitivity.allCases.map(\.title))
+        popup.selectItem(withTitle: selection.title)
+        popup.target = self
+        popup.action = action
+        popup.controlSize = .small
+        popup.setAccessibilityLabel(title)
+        let row = NSStackView(views: [label, popup])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        return row
+    }
+
     @objc private func refresh() {
         let now = ProcessInfo.processInfo.systemUptime
+        if !demo { audio.refreshDeviceLevels(now: now) }
         if now - lastCameraRefresh >= 1 {
             camera.refresh()
             lastCameraRefresh = now
@@ -120,9 +162,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             levels = [audio.inputLevel, audio.outputLeftLevel, audio.outputRightLevel]
         }
-        dockMeter.update(levels, active: demo || audio.isRunning)
-        windowMeter.update(levels, active: demo || audio.isRunning)
+        let displayedLevels = [
+            levels[0] * inputSensitivity.gain,
+            levels[1] * outputSensitivity.gain,
+            levels[2] * outputSensitivity.gain
+        ]
+        dockMeter.update(displayedLevels, active: demo || audio.isRunning)
+        windowMeter.update(displayedLevels, active: demo || audio.isRunning)
         NSApp.dockTile.display()
+    }
+
+    @objc private func changeInputSensitivity() {
+        guard MeterSensitivity.allCases.indices.contains(inputSensitivityPopup.indexOfSelectedItem) else { return }
+        inputSensitivity = MeterSensitivity.allCases[inputSensitivityPopup.indexOfSelectedItem]
+        UserDefaults.standard.set(inputSensitivity.rawValue, forKey: "inputSensitivity")
+        resetMeterPeaksAndRefresh()
+    }
+
+    @objc private func changeOutputSensitivity() {
+        guard MeterSensitivity.allCases.indices.contains(outputSensitivityPopup.indexOfSelectedItem) else { return }
+        outputSensitivity = MeterSensitivity.allCases[outputSensitivityPopup.indexOfSelectedItem]
+        UserDefaults.standard.set(outputSensitivity.rawValue, forKey: "outputSensitivity")
+        resetMeterPeaksAndRefresh()
+    }
+
+    private func resetMeterPeaksAndRefresh() {
+        dockMeter.peaks = [0, 0, 0]
+        windowMeter.peaks = [0, 0, 0]
+        refresh()
     }
 
     private func refreshLabels() {
