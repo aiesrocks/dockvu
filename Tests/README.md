@@ -144,3 +144,14 @@ The app now overwrites `~/Library/Caches/local.dockvu.app/health.json` every fiv
 seconds after a successful display refresh. The hourly watcher checks this
 heartbeat as well as the 100 MiB memory budget; a heartbeat older than 30 seconds
 is reported as `display_stalled`. A missing record is reported separately.
+
+## Invalid negative output-volume readings
+
+The Shanling UP5 output reported a finite `-1.437647e+28` dB value alongside a
+valid `0.5625` scalar volume and no mute. Converting that dB value underflowed to
+zero, silencing the output meters despite ongoing callbacks. Finite hardware dB
+values outside -160...+60 now fall back to scalar volume; negative infinity still
+represents legitimate silence. `OutputVolumeTests` covers the captured value,
+main/per-channel controls, quiet valid dB levels, and infinity behavior. Opt-in
+app diagnostics now include raw output peaks and applied gains, so live tests
+can distinguish actual capture silence from volume scaling.

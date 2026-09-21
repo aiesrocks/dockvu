@@ -147,7 +147,7 @@ final class AudioMonitor: NSObject, ObservableObject {
 
     func diagnostics() -> String {
         let counts = captureMailbox.callbackCounts()
-        return "inputCallbacks=\(counts.input) outputCallbacks=\(counts.output) inputGeneration=\(inputCaptureGeneration) outputGeneration=\(outputCaptureGeneration) inputDevice=\(inputDeviceID) outputDevice=\(outputDeviceID) input=\(inputLevel) left=\(outputLeftLevel) right=\(outputRightLevel) status=\(status)"
+        return "inputCallbacks=\(counts.input) outputCallbacks=\(counts.output) inputGeneration=\(inputCaptureGeneration) outputGeneration=\(outputCaptureGeneration) inputDevice=\(inputDeviceID) outputDevice=\(outputDeviceID) rawLeft=\(rawOutputLeftLevel) rawRight=\(rawOutputRightLevel) gainLeft=\(outputGain.left) gainRight=\(outputGain.right) input=\(inputLevel) left=\(outputLeftLevel) right=\(outputRightLevel) status=\(status)"
     }
 
     // MARK: - Microphone

@@ -84,11 +84,57 @@ private func runDeterministicTests() {
 
     do {
         let reader = FakePropertyReader()
+        reader.setFloat(-1.437647e+28, kAudioDevicePropertyVolumeDecibels)
+        reader.setFloat(0.5625, kAudioDevicePropertyVolumeScalar)
+        let gain = OutputVolume(reader: reader).gains(deviceID: 42)
+        expectClose(gain.left, 0.5625, "implausibly low main dB should fall back to scalar")
+        expectClose(gain.right, 0.5625, "broken negative main dB should not silence output")
+    }
+
+    do {
+        let reader = FakePropertyReader()
         reader.setFloat(0.25, kAudioDevicePropertyVolumeScalar, element: 1)
         reader.setFloat(0.75, kAudioDevicePropertyVolumeScalar, element: 2)
         let gain = OutputVolume(reader: reader).gains(deviceID: 42)
         expectClose(gain.left, 0.25, "channel scalar should drive left without main volume")
         expectClose(gain.right, 0.75, "channel scalar should drive right without main volume")
+    }
+
+    do {
+        let reader = FakePropertyReader()
+        reader.setFloat(-1.437647e+28, kAudioDevicePropertyVolumeDecibels, element: 1)
+        reader.setFloat(0.25, kAudioDevicePropertyVolumeScalar, element: 1)
+        reader.setFloat(-1.437647e+28, kAudioDevicePropertyVolumeDecibels, element: 2)
+        reader.setFloat(0.75, kAudioDevicePropertyVolumeScalar, element: 2)
+        let gain = OutputVolume(reader: reader).gains(deviceID: 42)
+        expectClose(gain.left, 0.25, "implausibly low left dB should fall back to scalar")
+        expectClose(gain.right, 0.75, "implausibly low right dB should fall back to scalar")
+    }
+
+    do {
+        let reader = FakePropertyReader()
+        reader.setFloat(-96, kAudioDevicePropertyVolumeDecibels)
+        let gain = OutputVolume(reader: reader).gains(deviceID: 42)
+        let expected = Float(pow(10.0, -96.0 / 20.0))
+        expectClose(gain.left, expected, accuracy: 0.0000001, "valid -96 dB should drive left")
+        expectClose(gain.right, expected, accuracy: 0.0000001, "valid -96 dB should drive right")
+    }
+
+    do {
+        let reader = FakePropertyReader()
+        reader.setFloat(-.infinity, kAudioDevicePropertyVolumeDecibels)
+        reader.setFloat(0.5625, kAudioDevicePropertyVolumeScalar)
+        let gain = OutputVolume(reader: reader).gains(deviceID: 42)
+        expect(gain == .init(left: 0, right: 0), "negative infinity dB should mean silence")
+    }
+
+    do {
+        let reader = FakePropertyReader()
+        reader.setFloat(.infinity, kAudioDevicePropertyVolumeDecibels)
+        reader.setFloat(0.5625, kAudioDevicePropertyVolumeScalar)
+        let gain = OutputVolume(reader: reader).gains(deviceID: 42)
+        expectClose(gain.left, 0.5625, "positive infinity dB should fall back to scalar")
+        expectClose(gain.right, 0.5625, "positive infinity dB should not overflow output")
     }
 
     do {
@@ -112,6 +158,13 @@ private func runDeterministicTests() {
     do {
         let gain = OutputVolume(reader: FakePropertyReader()).gains(deviceID: 42)
         expect(gain == .unity, "unsupported output controls should use unity gain")
+    }
+
+    do {
+        let reader = FakePropertyReader()
+        reader.setFloat(-1.437647e+28, kAudioDevicePropertyVolumeDecibels)
+        let gain = OutputVolume(reader: reader).gains(deviceID: 42)
+        expect(gain == .unity, "invalid dB without scalar support should use unity gain")
     }
 
     do {

@@ -72,9 +72,11 @@ struct OutputVolume {
     }
 
     private let reader: any AudioPropertyReading
-    // Consumer output controls normally top out near 0 dB, with some interfaces allowing a
-    // modest boost. Values above +60 dB are treated as broken-driver sentinels; one real device
-    // reports +780.8003 dB alongside a valid 0...1 scalar control.
+    // Consumer output controls normally stay within this range. Finite values outside it are
+    // treated as broken-driver sentinels; real devices have reported both +780.8003 dB and
+    // -1.437647e+28 dB alongside a valid 0...1 scalar control. Negative infinity remains the
+    // Core Audio representation of silence.
+    private static let minimumPlausibleDecibels: Float32 = -160
     private static let maximumPlausibleDecibels: Float32 = 60
 
     init(reader: any AudioPropertyReading = CoreAudioPropertyReader()) {
@@ -129,7 +131,7 @@ struct OutputVolume {
             element: element
         ), !decibels.isNaN, decibels <= Self.maximumPlausibleDecibels {
             if decibels == -.infinity { return 0 }
-            if decibels.isFinite {
+            if decibels.isFinite, decibels >= Self.minimumPlausibleDecibels {
                 let amplitude = pow(10.0, Double(decibels) / 20.0)
                 if amplitude.isFinite, amplitude <= Double(Float.greatestFiniteMagnitude) {
                     return Float(amplitude)
