@@ -4,6 +4,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let audio = AudioMonitor()
     private let camera = CameraMonitor()
+    private let heartbeat = DisplayHeartbeat()
     private var lastCameraRefresh: TimeInterval = -.infinity
     private let dockMeter = MeterView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
     private let windowMeter = MeterView(frame: NSRect(x: 0, y: 0, width: 176, height: 176))
@@ -23,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var outputSensitivity = MeterSensitivity(
         rawValue: UserDefaults.standard.string(forKey: "outputSensitivity") ?? ""
     ) ?? .normal
+    private var lastDiagnostics: TimeInterval = -.infinity
     private var demo = CommandLine.arguments.contains("--demo")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -138,6 +140,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func refresh() {
         let now = ProcessInfo.processInfo.systemUptime
         if !demo { audio.refreshDeviceLevels(now: now) }
+        if CommandLine.arguments.contains("--diagnostics"), now - lastDiagnostics >= 5 {
+            print("DockVU health: time=\(Date().timeIntervalSince1970) \(audio.diagnostics())")
+            fflush(stdout)
+            lastDiagnostics = now
+        }
         if now - lastCameraRefresh >= 1 {
             camera.refresh()
             lastCameraRefresh = now
@@ -170,6 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dockMeter.update(displayedLevels, active: demo || audio.isRunning)
         windowMeter.update(displayedLevels, active: demo || audio.isRunning)
         NSApp.dockTile.display()
+        heartbeat.record(now: now)
     }
 
     @objc private func changeInputSensitivity() {

@@ -18,8 +18,7 @@ final class AudioMonitor: NSObject, ObservableObject {
     @Published private(set) var status = "Stopped"
     @Published private(set) var isRunning = false
 
-    private let inputEngine = AVAudioEngine()
-    private var inputTapInstalled = false
+    private let microphone = MicrophoneCapture()
     private var inputIsActive = false
     private var outputIsActive = false
     private var wantsToRun = false
@@ -44,30 +43,27 @@ final class AudioMonitor: NSObject, ObservableObject {
     private var outputIOProcID: AudioDeviceIOProcID?
     private let outputQueue = DispatchQueue(label: "app.dockvu.output-meter", qos: .userInteractive)
 
-    private var engineObserver: NSObjectProtocol?
     private var defaultDeviceListener: AudioObjectPropertyListenerBlock?
-    private var inputRestartTask: Task<Void, Never>?
-    private var outputRestartTask: Task<Void, Never>?
+    private let captureMailbox = AudioCaptureMailbox()
+    private let deviceListenerQueue = DispatchQueue(label: "app.dockvu.device-changes")
+    private var captureSession: UInt64 = 0
+    private var inputRestartAt: TimeInterval?
+    private var outputRestartAt: TimeInterval?
 
     override init() {
         super.init()
         refreshDeviceNames()
     }
 
-    deinit {
-        inputRestartTask?.cancel()
-        outputRestartTask?.cancel()
-        if let engineObserver {
-            NotificationCenter.default.removeObserver(engineObserver)
-        }
-    }
-
     func start() {
         guard !wantsToRun else { return }
         wantsToRun = true
+        inputRestartAt = nil
+        outputRestartAt = nil
         inputError = nil
         outputError = nil
         status = "Requesting audio permissions…"
+        captureSession = captureMailbox.beginSession()
         installDeviceListeners()
 
         // Creating the process tap is the system-provided request for System Audio Recording
@@ -85,17 +81,10 @@ final class AudioMonitor: NSObject, ObservableObject {
         case .authorized:
             startInput()
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                Task { @MainActor in
-                    guard let self, self.wantsToRun else { return }
-                    if granted {
-                        self.startInput()
-                    } else {
-                        self.inputIsActive = false
-                        self.inputError = "Microphone access denied"
-                        self.refreshRunningState()
-                    }
-                }
+            let mailbox = captureMailbox
+            let session = captureSession
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                mailbox.microphonePermission(granted, session: session)
             }
         case .denied, .restricted:
             inputIsActive = false
@@ -111,10 +100,9 @@ final class AudioMonitor: NSObject, ObservableObject {
     func stop() {
         guard wantsToRun || isRunning else { return }
         wantsToRun = false
-        inputRestartTask?.cancel()
-        inputRestartTask = nil
-        outputRestartTask?.cancel()
-        outputRestartTask = nil
+        inputRestartAt = nil
+        outputRestartAt = nil
+        captureSession = captureMailbox.beginSession()
         removeDeviceListeners()
         stopInput()
         stopOutputTap()
@@ -132,7 +120,16 @@ final class AudioMonitor: NSObject, ObservableObject {
     /// Polls hardware controls off the real-time audio threads and reapplies them to the most
     /// recent raw peaks. The latter makes a volume or mute change visible even during silence.
     func refreshDeviceLevels(now: TimeInterval) {
-        guard wantsToRun, now - lastDeviceLevelRefresh >= 0.1 else { return }
+        guard wantsToRun else { return }
+        processCaptureEvents(now: now)
+        let levels = captureMailbox.levels(now: now)
+        rawInputLevel = levels.input
+        rawOutputLeftLevel = levels.left
+        rawOutputRightLevel = levels.right
+        guard now - lastDeviceLevelRefresh >= 0.1 else {
+            applyDeviceLevels()
+            return
+        }
         lastDeviceLevelRefresh = now
 
         if inputDeviceID != kAudioObjectUnknown {
@@ -148,42 +145,36 @@ final class AudioMonitor: NSObject, ObservableObject {
         applyDeviceLevels()
     }
 
+    func diagnostics() -> String {
+        let counts = captureMailbox.callbackCounts()
+        return "inputCallbacks=\(counts.input) outputCallbacks=\(counts.output) inputGeneration=\(inputCaptureGeneration) outputGeneration=\(outputCaptureGeneration) inputDevice=\(inputDeviceID) outputDevice=\(outputDeviceID) input=\(inputLevel) left=\(outputLeftLevel) right=\(outputRightLevel) status=\(status)"
+    }
+
     // MARK: - Microphone
 
     private func startInput() {
         guard wantsToRun, !inputIsActive else { return }
-
-        let input = inputEngine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            inputIsActive = false
-            inputError = "No microphone input available"
-            refreshRunningState()
-            return
-        }
-
-        if !inputTapInstalled {
-            inputCaptureGeneration &+= 1
-            let captureGeneration = inputCaptureGeneration
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-                let level = Self.peakLevel(in: buffer)
-                Task { @MainActor [weak self] in
-                    guard let self, self.wantsToRun,
-                          self.inputCaptureGeneration == captureGeneration else { return }
-                    self.rawInputLevel = level
-                    self.applyDeviceLevels()
-                }
-            }
-            inputTapInstalled = true
-        }
+        inputCaptureGeneration &+= 1
+        let generation = inputCaptureGeneration
+        let session = captureSession
+        let mailbox = captureMailbox
+        mailbox.resetInput(generation: generation)
 
         do {
-            inputEngine.prepare()
-            try inputEngine.start()
+            // Native setup contains Objective-C exceptions before they can unwind this timer.
+            // Every attempt owns a fresh engine and negotiates the current hardware format.
+            try microphone.start(levelHandler: { level in
+                mailbox.publishInput(level, generation: generation,
+                                     now: ProcessInfo.processInfo.systemUptime)
+            }, configurationChangeHandler: {
+                mailbox.inputConfigurationChanged(generation: generation, session: session)
+            })
             inputIsActive = true
-            inputDeviceID = Self.currentDeviceID(for: input)
-                ?? Self.defaultDeviceID(selector: kAudioHardwarePropertyDefaultInputDevice)
-                ?? AudioObjectID(kAudioObjectUnknown)
+            inputDeviceID = microphone.deviceID
+            if inputDeviceID == kAudioObjectUnknown {
+                inputDeviceID = Self.defaultDeviceID(selector: kAudioHardwarePropertyDefaultInputDevice)
+                    ?? AudioObjectID(kAudioObjectUnknown)
+            }
             lastDeviceLevelRefresh = -.infinity
             inputError = nil
             refreshDeviceNames()
@@ -192,16 +183,16 @@ final class AudioMonitor: NSObject, ObservableObject {
             stopInput()
             inputError = "Microphone unavailable: \(error.localizedDescription)"
             refreshRunningState()
+            // Hardware may still be settling after a disconnect/rate change. Retry at a
+            // bounded rate while monitoring remains requested; output continues meanwhile.
+            if wantsToRun { inputRestartAt = ProcessInfo.processInfo.systemUptime + 1 }
         }
     }
 
     private func stopInput() {
         inputCaptureGeneration &+= 1
-        inputEngine.stop()
-        if inputTapInstalled {
-            inputEngine.inputNode.removeTap(onBus: 0)
-            inputTapInstalled = false
-        }
+        captureMailbox.resetInput(generation: inputCaptureGeneration)
+        microphone.stop()
         inputIsActive = false
         rawInputLevel = 0
         inputLevel = 0
@@ -210,33 +201,41 @@ final class AudioMonitor: NSObject, ObservableObject {
         lastDeviceLevelRefresh = -.infinity
     }
 
-    private func scheduleInputRestart() {
-        guard wantsToRun, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
-        inputRestartTask?.cancel()
-        inputRestartTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled, let self, self.wantsToRun else { return }
-            self.stopInput()
-            self.startInput()
-        }
-    }
-
-    private func scheduleOutputRestart() {
-        guard wantsToRun else { return }
-        outputRestartTask?.cancel()
-        outputRestartTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled, let self, self.wantsToRun else { return }
-            self.stopOutputTap()
-            do {
-                try self.startOutputTap()
-                self.outputIsActive = true
-                self.outputError = nil
-            } catch {
-                self.outputIsActive = false
-                self.outputError = "System audio unavailable: \(error.localizedDescription)"
+    /// Runs on the selector timer, independently of main dispatch/Swift task delivery.
+    private func processCaptureEvents(now: TimeInterval) {
+        let events = captureMailbox.takeEvents()
+        if let granted = events.microphonePermission {
+            if granted {
+                startInput()
+            } else {
+                inputError = "Microphone access denied"
+                refreshRunningState()
             }
-            self.refreshRunningState()
+        }
+        guard wantsToRun else { return }
+        if events.inputChanged || events.outputChanged { refreshDeviceNames() }
+        if events.inputChanged,
+           AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+            inputRestartAt = now + 0.25
+        }
+        if events.outputChanged { outputRestartAt = now + 0.25 }
+        if let deadline = inputRestartAt, now >= deadline {
+            inputRestartAt = nil
+            stopInput()
+            startInput()
+        }
+        if let deadline = outputRestartAt, now >= deadline {
+            outputRestartAt = nil
+            stopOutputTap()
+            do {
+                try startOutputTap()
+                outputIsActive = true
+                outputError = nil
+            } catch {
+                outputIsActive = false
+                outputError = "System audio unavailable: \(error.localizedDescription)"
+            }
+            refreshRunningState()
         }
     }
 
@@ -255,6 +254,8 @@ final class AudioMonitor: NSObject, ObservableObject {
         lastDeviceLevelRefresh = -.infinity
         outputCaptureGeneration &+= 1
         let captureGeneration = outputCaptureGeneration
+        let mailbox = captureMailbox
+        mailbox.resetOutput(generation: captureGeneration)
         let description = CATapDescription(
             excludingProcesses: [],
             deviceUID: outputUID,
@@ -307,13 +308,9 @@ final class AudioMonitor: NSObject, ObservableObject {
                     outputQueue
                 ) { _, inputData, _, _, _ in
                     let levels = Self.stereoPeakLevels(in: inputData)
-                    Task { @MainActor [weak self] in
-                        guard let self, self.wantsToRun,
-                              self.outputCaptureGeneration == captureGeneration else { return }
-                        self.rawOutputLeftLevel = levels.left
-                        self.rawOutputRightLevel = levels.right
-                        self.applyDeviceLevels()
-                    }
+                    mailbox.publishOutput(left: levels.left, right: levels.right,
+                                          generation: captureGeneration,
+                                          now: ProcessInfo.processInfo.systemUptime)
                 },
                 operation: "connect the output meter"
             )
@@ -339,6 +336,7 @@ final class AudioMonitor: NSObject, ObservableObject {
 
     private func stopOutputTap() {
         outputCaptureGeneration &+= 1
+        captureMailbox.resetOutput(generation: outputCaptureGeneration)
         if aggregateDeviceID != kAudioObjectUnknown, let outputIOProcID {
             AudioDeviceStop(aggregateDeviceID, outputIOProcID)
             AudioDeviceDestroyIOProcID(aggregateDeviceID, outputIOProcID)
@@ -371,17 +369,9 @@ final class AudioMonitor: NSObject, ObservableObject {
     private func installDeviceListeners() {
         guard defaultDeviceListener == nil else { return }
 
-        engineObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: inputEngine,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.scheduleInputRestart()
-            }
-        }
-
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] count, addresses in
+        let mailbox = captureMailbox
+        let session = captureSession
+        let listener: AudioObjectPropertyListenerBlock = { count, addresses in
             var inputChanged = false
             var outputChanged = false
             for index in 0..<Int(count) {
@@ -390,33 +380,24 @@ final class AudioMonitor: NSObject, ObservableObject {
                 outputChanged = outputChanged
                     || addresses[index].mSelector == kAudioHardwarePropertyDefaultOutputDevice
             }
-            Task { @MainActor in
-                guard let self, self.wantsToRun else { return }
-                self.refreshDeviceNames()
-                if inputChanged { self.scheduleInputRestart() }
-                if outputChanged { self.scheduleOutputRestart() }
-            }
+            mailbox.deviceChanged(input: inputChanged, output: outputChanged, session: session)
         }
         defaultDeviceListener = listener
 
         var inputAddress = Self.defaultDeviceAddress(selector: kAudioHardwarePropertyDefaultInputDevice)
         var outputAddress = Self.defaultDeviceAddress(selector: kAudioHardwarePropertyDefaultOutputDevice)
         let systemObject = AudioObjectID(kAudioObjectSystemObject)
-        AudioObjectAddPropertyListenerBlock(systemObject, &inputAddress, .main, listener)
-        AudioObjectAddPropertyListenerBlock(systemObject, &outputAddress, .main, listener)
+        AudioObjectAddPropertyListenerBlock(systemObject, &inputAddress, deviceListenerQueue, listener)
+        AudioObjectAddPropertyListenerBlock(systemObject, &outputAddress, deviceListenerQueue, listener)
     }
 
     private func removeDeviceListeners() {
-        if let engineObserver {
-            NotificationCenter.default.removeObserver(engineObserver)
-            self.engineObserver = nil
-        }
         guard let listener = defaultDeviceListener else { return }
         var inputAddress = Self.defaultDeviceAddress(selector: kAudioHardwarePropertyDefaultInputDevice)
         var outputAddress = Self.defaultDeviceAddress(selector: kAudioHardwarePropertyDefaultOutputDevice)
         let systemObject = AudioObjectID(kAudioObjectSystemObject)
-        AudioObjectRemovePropertyListenerBlock(systemObject, &inputAddress, .main, listener)
-        AudioObjectRemovePropertyListenerBlock(systemObject, &outputAddress, .main, listener)
+        AudioObjectRemovePropertyListenerBlock(systemObject, &inputAddress, deviceListenerQueue, listener)
+        AudioObjectRemovePropertyListenerBlock(systemObject, &outputAddress, deviceListenerQueue, listener)
         defaultDeviceListener = nil
     }
 
@@ -443,6 +424,8 @@ final class AudioMonitor: NSObject, ObservableObject {
             if status.isEmpty { status = "Audio monitoring unavailable" }
             if inputError != nil, outputError != nil {
                 wantsToRun = false
+                inputRestartAt = nil
+                outputRestartAt = nil
                 removeDeviceListeners()
             }
         }
@@ -466,21 +449,6 @@ final class AudioMonitor: NSObject, ObservableObject {
     }
 
     // MARK: - Audio helpers
-
-    nonisolated static func peakLevel(in buffer: AVAudioPCMBuffer) -> Float {
-        var peak: Float = 0
-        let buffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-        for audioBuffer in buffers {
-            guard let data = audioBuffer.mData else { continue }
-            let samples = data.assumingMemoryBound(to: Float.self)
-            let sampleCount = Int(audioBuffer.mDataByteSize) / MemoryLayout<Float>.stride
-            for index in 0..<sampleCount {
-                let magnitude = abs(samples[index])
-                if magnitude.isFinite { peak = max(peak, magnitude) }
-            }
-        }
-        return min(1, peak)
-    }
 
     nonisolated static func stereoPeakLevels(
         in audioBufferList: UnsafePointer<AudioBufferList>
@@ -598,23 +566,6 @@ final class AudioMonitor: NSObject, ObservableObject {
         }
         guard let deviceUID else { return nil }
         return deviceUID.takeRetainedValue() as String
-    }
-
-    nonisolated private static func currentDeviceID(for input: AVAudioInputNode) -> AudioObjectID? {
-        guard let audioUnit = input.audioUnit else { return nil }
-        var deviceID = AudioObjectID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        guard AudioUnitGetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            &size
-        ) == noErr, deviceID != kAudioObjectUnknown else {
-            return nil
-        }
-        return deviceID
     }
 
     nonisolated private static func defaultDeviceID(

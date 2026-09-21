@@ -3,9 +3,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/build/DockVU.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$ROOT/build/module-cache"
+xcrun clang -fobjc-arc -fobjc-arc-exceptions -fmodules -fmodules-cache-path="$ROOT/build/module-cache" -O2 -mmacosx-version-min=14.4 \
+  -c "$ROOT/Sources/MicrophoneCapture.m" -o "$ROOT/build/MicrophoneCapture.o"
 xcrun swiftc -swift-version 5 -O -target "$(uname -m)-apple-macosx14.4" \
   -module-cache-path "$ROOT/build/module-cache" \
-  "$ROOT"/Sources/*.swift -o "$APP/Contents/MacOS/DockVU" \
+  -import-objc-header "$ROOT/Sources/DockVU-Bridging-Header.h" \
+  "$ROOT"/Sources/*.swift "$ROOT/build/MicrophoneCapture.o" -o "$APP/Contents/MacOS/DockVU" \
   -framework AppKit -framework AVFoundation -framework CoreAudio -framework CoreMediaIO -framework Combine
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 xcrun swiftc -swift-version 5 -module-cache-path "$ROOT/build/module-cache" \
