@@ -40,6 +40,8 @@ The app follows the default input and output devices. On a multichannel audio in
 
 ## Permissions and development
 
+Before treating a quiet **IN** meter as frozen, compare DockVU's **Input · [device name]** with the microphone selected in your conference app. Apps such as Teams may use a different microphone from the macOS default that DockVU monitors, so a working call can coincide with no activity in DockVU. Match the selected devices when checking input metering; silence alone does not prove capture is stuck.
+
 If a meter does not respond, check **System Settings → Privacy & Security → Microphone** and **Screen & System Audio Recording**, then pause and restart monitoring. Protected audio may be unavailable to capture.
 
 The build uses local ad-hoc signing. Rebuilding may require granting permissions again. If you have a signing identity, use `DOCKVU_SIGN_IDENTITY="Your identity" bash scripts/build.sh`.
